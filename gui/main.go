@@ -8,7 +8,7 @@ import (
 	"github.com/example/gotextbuffer/gui/editor"
 )
 
-func maindd() {
+func main() {
 	// 创建应用程序
 	app := gtk.NewApplication("com.example.gotextbuffer", 0)
 

@@ -2,6 +2,7 @@ package editor
 
 import (
 	"github.com/diamondburned/gotk4/pkg/gio/v2"
+	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotk4/pkg/gtk/v4"
 )
 
@@ -9,7 +10,7 @@ import (
 func SetupApplication(app *gtk.Application) {
 	// Add application actions
 	quitAction := gio.NewSimpleAction("quit", nil)
-	quitAction.ConnectActivate(func(parameter *gio.Variant) {
+	quitAction.ConnectActivate(func(parameter *glib.Variant) {
 		app.Quit()
 	})
 	app.AddAction(quitAction)

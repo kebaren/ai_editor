@@ -62,31 +62,58 @@ func (a *BufferAdapter) GetGtkBuffer() *gtk.TextBuffer {
 
 // SetCursorPosition sets the cursor position in the GTK buffer
 func (a *BufferAdapter) SetCursorPosition(position textbuffer.Position) {
-	iter := a.gtkBuffer.GetIterAtLineOffset(position.Line, position.Column)
+	// 创建迭代器
+	iter := a.gtkBuffer.StartIter()
+	// 移动到指定位置
+	for i := 0; i < position.Line; i++ {
+		iter.ForwardLine()
+	}
+	for i := 0; i < position.Column; i++ {
+		iter.ForwardChar()
+	}
 	a.gtkBuffer.PlaceCursor(iter)
 }
 
 // GetCursorPosition gets the cursor position from the GTK buffer
 func (a *BufferAdapter) GetCursorPosition() textbuffer.Position {
-	mark := a.gtkBuffer.GetMark("insert")
-	iter := a.gtkBuffer.GetIterAtMark(mark)
+	iter := a.gtkBuffer.IterAtMark(a.gtkBuffer.GetInsert())
+	line := iter.Line()
+	column := iter.LineOffset()
 	return textbuffer.Position{
-		Line:   iter.Line(),
-		Column: iter.LineOffset(),
+		Line:   line,
+		Column: column,
 	}
 }
 
 // SelectRange selects a range in the GTK buffer
 func (a *BufferAdapter) SelectRange(r textbuffer.Range) {
-	startIter := a.gtkBuffer.GetIterAtLineOffset(r.Start.Line, r.Start.Column)
-	endIter := a.gtkBuffer.GetIterAtLineOffset(r.End.Line, r.End.Column)
+	// 创建开始和结束迭代器
+	startIter := a.gtkBuffer.StartIter()
+	endIter := a.gtkBuffer.StartIter()
+
+	// 移动到开始位置
+	for i := 0; i < r.Start.Line; i++ {
+		startIter.ForwardLine()
+	}
+	for i := 0; i < r.Start.Column; i++ {
+		startIter.ForwardChar()
+	}
+
+	// 移动到结束位置
+	for i := 0; i < r.End.Line; i++ {
+		endIter.ForwardLine()
+	}
+	for i := 0; i < r.End.Column; i++ {
+		endIter.ForwardChar()
+	}
+
 	a.gtkBuffer.SelectRange(startIter, endIter)
 }
 
-// GetSelection gets the current selection from the GTK buffer
+// GetSelection returns the current selection in the GTK buffer
 func (a *BufferAdapter) GetSelection() (textbuffer.Range, bool) {
 	if a.gtkBuffer.HasSelection() {
-		start, end := a.gtkBuffer.SelectionBounds()
+		start, end := a.gtkBuffer.Bounds()
 		return textbuffer.Range{
 			Start: textbuffer.Position{
 				Line:   start.Line(),
