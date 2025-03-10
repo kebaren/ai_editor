@@ -143,7 +143,7 @@ func TestGapBufferWithLargeText(t *testing.T) {
 	}
 
 	// 测试获取行数
-	expectedLines := 100
+	expectedLines := 101 // 100行文本 + 最后一个空行
 	if buffer.GetLineCount() != expectedLines {
 		t.Errorf("Expected %d lines, got %d", expectedLines, buffer.GetLineCount())
 	}

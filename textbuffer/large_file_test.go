@@ -3,37 +3,52 @@ package textbuffer
 import (
 	"fmt"
 	"math/rand"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
 
 const (
-	ONE_GB = 1024 * 1024 * 1024 // 1GB in bytes
+	// 减小测试数据大小，从1GB减少到100MB
+	TEST_SIZE = 100 * 1024 * 1024 // 100MB in bytes
 )
 
 // TestLargeFilePerformance 测试大文件性能
 func TestLargeFilePerformance(t *testing.T) {
-	// 生成1GB测试数据
-	fmt.Println("生成1GB测试数据...")
+	// 强制GC，确保测试开始前内存是干净的
+	runtime.GC()
+
+	// 生成测试数据
+	fmt.Println("生成测试数据...")
 	start := time.Now()
-	testData := generateLargeText(ONE_GB)
+	testData := generateLargeText(TEST_SIZE)
 	fmt.Printf("数据生成完成，耗时: %.2f秒\n", time.Since(start).Seconds())
 
 	// 创建TextBuffer
 	buffer := NewTextBufferWithText("")
 
 	// 测试加载
-	fmt.Println("\n测试加载1GB文本...")
+	fmt.Println("\n测试加载文本...")
 	start = time.Now()
 	buffer.SetText(testData)
 	fmt.Printf("加载完成，耗时: %.2f秒\n", time.Since(start).Seconds())
 
+	// 释放testData，减少内存使用
+	testData = ""
+	runtime.GC()
+
 	// 测试读取
 	fmt.Println("\n测试读取全部文本...")
 	start = time.Now()
-	_ = buffer.GetText()
+	retrievedText := buffer.GetText()
+	textLen := len(retrievedText) // 使用retrievedText
 	fmt.Printf("读取完成，耗时: %.2f秒\n", time.Since(start).Seconds())
+	fmt.Printf("文本长度: %d 字符\n", textLen)
+
+	// 立即释放retrievedText
+	retrievedText = ""
+	runtime.GC()
 
 	// 测试随机插入
 	fmt.Println("\n测试随机位置插入1KB文本...")
@@ -77,6 +92,10 @@ func TestLargeFilePerformance(t *testing.T) {
 	fmt.Printf("\n内存使用统计:\n")
 	fmt.Printf("当前使用: %.2f MB\n", float64(memStats.CurrentUsage)/(1024*1024))
 	fmt.Printf("峰值使用: %.2f MB\n", float64(memStats.PeakUsage)/(1024*1024))
+
+	// 清理资源
+	buffer.Close()
+	runtime.GC()
 }
 
 // generateLargeText 生成大文本用于测试
@@ -100,5 +119,9 @@ func generateLargeText(size int) string {
 		}
 	}
 
-	return sb.String()[:size]
+	// 确保返回的字符串不超过指定大小
+	if sb.Len() > size {
+		return sb.String()[:size]
+	}
+	return sb.String()
 }

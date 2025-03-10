@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -310,6 +311,12 @@ func (tb *TextBuffer) SetFilePath(filePath string) {
 	tb.mutex.Lock()
 	oldFilePath := tb.filePath
 	tb.filePath = filePath
+
+	// 检测文件类型和语言
+	extension := strings.ToLower(filepath.Ext(filePath))
+	languageID, _ := detectLanguageFromExtension(extension)
+	tb.languageID = languageID
+
 	tb.mutex.Unlock()
 
 	if oldFilePath != filePath {
@@ -414,6 +421,12 @@ func (tb *TextBuffer) Insert(position Position, text string) error {
 
 	tb.mutex.Lock()
 
+	// 检查gapBuffer是否为nil
+	if tb.gapBuffer == nil {
+		tb.mutex.Unlock()
+		return fmt.Errorf("cannot insert text: buffer is closed")
+	}
+
 	// 获取偏移量
 	offset := tb.gapBuffer.GetOffsetAt(position)
 
@@ -448,6 +461,12 @@ func (tb *TextBuffer) Insert(position Position, text string) error {
 // Delete 删除指定范围的文本
 func (tb *TextBuffer) Delete(r Range) error {
 	tb.mutex.Lock()
+
+	// 检查gapBuffer是否为nil
+	if tb.gapBuffer == nil {
+		tb.mutex.Unlock()
+		return fmt.Errorf("cannot delete text: buffer is closed")
+	}
 
 	// 获取偏移量
 	startOffset := tb.gapBuffer.GetOffsetAt(r.Start)
@@ -921,7 +940,14 @@ func (tb *TextBuffer) SaveToFile(filePath string) error {
 		return fmt.Errorf("failed to create temporary file: %v", err)
 	}
 	tempFilePath := tempFile.Name()
-	defer os.Remove(tempFilePath) // 确保在出错时删除临时文件
+
+	// 使用一个变量来跟踪是否需要删除临时文件
+	needRemoveTempFile := true
+	defer func() {
+		if needRemoveTempFile {
+			os.Remove(tempFilePath) // 只在需要时删除临时文件
+		}
+	}()
 
 	// 获取文本大小
 	textSize := tb.gapBuffer.GetLength()
@@ -980,6 +1006,9 @@ func (tb *TextBuffer) SaveToFile(filePath string) error {
 		return fmt.Errorf("failed to rename temporary file: %v", err)
 	}
 
+	// 文件已成功重命名，不需要删除临时文件
+	needRemoveTempFile = false
+
 	// 更新文件路径
 	if tb.filePath != filePath {
 		oldPath := tb.filePath
@@ -1007,8 +1036,17 @@ func (tb *TextBuffer) SaveToFile(filePath string) error {
 // LoadFromFile 从文件加载文本
 func (tb *TextBuffer) LoadFromFile(filePath string) error {
 	// 检查文件是否存在
-	if _, err := os.Stat(filePath); os.IsNotExist(err) {
-		return fmt.Errorf("file does not exist: %s", filePath)
+	fileInfo, err := os.Stat(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("file does not exist: %s", filePath)
+		}
+		return fmt.Errorf("failed to stat file: %v", err)
+	}
+
+	// 检查文件是否为目录
+	if fileInfo.IsDir() {
+		return fmt.Errorf("path is a directory, not a file: %s", filePath)
 	}
 
 	// 打开文件
@@ -1019,7 +1057,7 @@ func (tb *TextBuffer) LoadFromFile(filePath string) error {
 	defer file.Close()
 
 	// 获取文件信息
-	fileInfo, err := file.Stat()
+	fileInfo, err = file.Stat()
 	if err != nil {
 		return fmt.Errorf("failed to get file info: %v", err)
 	}
@@ -1029,24 +1067,49 @@ func (tb *TextBuffer) LoadFromFile(filePath string) error {
 
 	// 检测文件类型和语言
 	extension := strings.ToLower(filepath.Ext(filePath))
-	languageID, _ := detectLanguageFromExtension(extension)
+	languageID, success := detectLanguageFromExtension(extension)
 
-	// 锁定文本缓冲区
-	tb.mutex.Lock()
-	defer tb.mutex.Unlock()
+	// 记录语言检测结果
+	if success {
+		log.Printf("Detected language %s for file %s", languageID, filePath)
+	} else {
+		log.Printf("Using default language %s for file %s", languageID, filePath)
+	}
+
+	var newBuffer *GapBuffer
+	var detectedEOLType EOLType
 
 	// 对于大文件，使用分块加载
 	if fileSize > int64(largeTextThreshold) {
 		// 创建一个新的GapBuffer
-		newBuffer := NewGapBuffer()
+		newBuffer = NewGapBuffer()
 
 		// 使用缓冲读取器
 		bufReader := bufio.NewReaderSize(file, chunkSize)
 
 		// 分块读取文件
 		buffer := make([]byte, chunkSize)
-		var totalText strings.Builder
-		totalText.Grow(int(fileSize))
+
+		// 预先分配足够的容量，但不实际分配内存
+		newBuffer.buffer = getBufferFromPool(int(fileSize) + initialGapSize)
+		if cap(newBuffer.buffer) < int(fileSize)+initialGapSize {
+			// 如果内存池中没有足够大的缓冲区，直接分配
+			newBuffer.buffer = make([]rune, 0, int(fileSize)+initialGapSize)
+		}
+		newBuffer.buffer = newBuffer.buffer[:0] // 重置长度
+
+		// 设置间隙位置
+		newBuffer.gapStart = 0
+		newBuffer.gapEnd = cap(newBuffer.buffer)
+		newBuffer.size = 0
+
+		// 使用临时字符串构建器，避免大字符串拼接
+		var tempBuilder strings.Builder
+		tempBuilder.Grow(chunkSize * 2) // 预分配足够的空间
+
+		// 用于检测EOL类型的样本
+		var sampleText string
+		sampleCollected := false
 
 		for {
 			n, err := bufReader.Read(buffer)
@@ -1058,27 +1121,66 @@ func (tb *TextBuffer) LoadFromFile(filePath string) error {
 				break
 			}
 
-			// 将字节转换为字符串并添加到缓冲区
+			// 将字节转换为字符串
 			chunk := string(buffer[:n])
-			totalText.WriteString(chunk)
+
+			// 收集样本用于EOL检测
+			if !sampleCollected && tempBuilder.Len() < 1000 {
+				tempBuilder.WriteString(chunk)
+				if tempBuilder.Len() >= 1000 {
+					sampleText = tempBuilder.String()[:1000]
+					detectedEOLType = detectEOLType(sampleText)
+					sampleCollected = true
+				}
+			} else if !sampleCollected {
+				sampleText = tempBuilder.String()
+				detectedEOLType = detectEOLType(sampleText)
+				sampleCollected = true
+			}
+
+			// 标准化换行符
+			if detectedEOLType == EOLWindows {
+				chunk = strings.ReplaceAll(chunk, "\r\n", "\n")
+			} else if detectedEOLType == EOLMac {
+				chunk = strings.ReplaceAll(chunk, "\r", "\n")
+			}
+
+			// 将字符串转换为rune并添加到缓冲区
+			tempRunes := []rune(chunk)
+
+			// 确保缓冲区有足够的空间
+			if newBuffer.size+len(tempRunes) > cap(newBuffer.buffer) {
+				// 扩展缓冲区
+				newCap := cap(newBuffer.buffer) * 2
+				if newCap < newBuffer.size+len(tempRunes) {
+					newCap = newBuffer.size + len(tempRunes) + initialGapSize
+				}
+				newBuf := getBufferFromPool(newCap)
+				if cap(newBuf) < newCap {
+					newBuf = make([]rune, newCap)
+				}
+				copy(newBuf, newBuffer.buffer[:newBuffer.size])
+				putBufferToPool(newBuffer.buffer)
+				newBuffer.buffer = newBuf
+				newBuffer.gapEnd = cap(newBuffer.buffer)
+			}
+
+			// 直接复制到缓冲区
+			copy(newBuffer.buffer[newBuffer.size:], tempRunes)
+			newBuffer.size += len(tempRunes)
+			newBuffer.gapStart = newBuffer.size
 		}
 
-		// 检测EOL类型
-		text := totalText.String()
-		tb.eolType = detectEOLType(text)
-
-		// 标准化换行符为\n
-		if tb.eolType == EOLWindows {
-			text = strings.ReplaceAll(text, "\r\n", "\n")
-		} else if tb.eolType == EOLMac {
-			text = strings.ReplaceAll(text, "\r", "\n")
+		// 如果没有收集到足够的样本，使用已有的
+		if !sampleCollected && tempBuilder.Len() > 0 {
+			sampleText = tempBuilder.String()
+			detectedEOLType = detectEOLType(sampleText)
 		}
 
-		// 设置文本
-		newBuffer.SetText(text)
-
-		// 替换旧的GapBuffer
-		tb.gapBuffer = newBuffer
+		// 清除缓存
+		newBuffer.textCacheValid = false
+		newBuffer.lineCountCacheValid = false
+		newBuffer.lineStartCacheValid = false
 	} else {
 		// 对于小文件，直接读取
 		content, err := io.ReadAll(file)
@@ -1090,31 +1192,50 @@ func (tb *TextBuffer) LoadFromFile(filePath string) error {
 		text := string(content)
 
 		// 检测EOL类型
-		tb.eolType = detectEOLType(text)
+		detectedEOLType = detectEOLType(text)
 
 		// 标准化换行符为\n
-		if tb.eolType == EOLWindows {
+		if detectedEOLType == EOLWindows {
 			text = strings.ReplaceAll(text, "\r\n", "\n")
-		} else if tb.eolType == EOLMac {
+		} else if detectedEOLType == EOLMac {
 			text = strings.ReplaceAll(text, "\r", "\n")
 		}
 
-		// 设置文本
-		tb.gapBuffer.SetText(text)
+		// 创建新的GapBuffer
+		newBuffer = NewGapBufferWithText(text)
 	}
+
+	// 锁定文本缓冲区进行更新
+	tb.mutex.Lock()
+
+	// 保存旧值用于事件触发
+	oldPath := tb.filePath
+	oldLanguageID := tb.languageID
+
+	// 替换当前缓冲区
+	if tb.gapBuffer != nil {
+		tb.gapBuffer.Close() // 确保旧缓冲区被正确释放
+	}
+	tb.gapBuffer = newBuffer
+
+	// 更新EOL类型
+	tb.eolType = detectedEOLType
 
 	// 清空撤销/重做栈
 	tb.undoStack.Clear()
 
 	// 更新文件路径和语言ID
-	oldPath := tb.filePath
 	tb.filePath = filePath
-
-	oldLanguageID := tb.languageID
 	tb.languageID = languageID
 
 	// 重置修改标志
 	tb.modified = false
+
+	// 获取当前文本用于事件触发
+	currentText := tb.gapBuffer.GetText()
+
+	// 解锁
+	tb.mutex.Unlock()
 
 	// 触发事件
 	if oldPath != filePath {
@@ -1135,7 +1256,7 @@ func (tb *TextBuffer) LoadFromFile(filePath string) error {
 
 	tb.triggerEvent(EventTextChanged, TextChangedEventData{
 		Position:      Position{Line: 0, Column: 0},
-		Text:          tb.gapBuffer.GetText(),
+		Text:          currentText,
 		OldText:       "",
 		OperationType: OperationSetText,
 	})

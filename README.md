@@ -1,54 +1,122 @@
-# GoTextBuffer
+# GoTextBuffer 文本编辑器
 
-一个Go语言实现的文本缓冲区，参考VSCode的TextBuffer实现逻辑。
+一个基于自定义文本缓冲区实现的高性能文本编辑器，支持大文件处理、搜索替换、撤销重做等功能。
 
-## 功能特性
+## 功能特点
 
-- 高效的文本存储和操作
-- 支持插入、删除、替换等基本文本操作
-- 支持行和列的定位
-- 支持撤销和重做操作
-- 支持换行符管理，优化多行文本处理
+- 高性能文本处理，支持大文件（GB级别）
+- 基于Gap Buffer的高效文本编辑
+- 撤销/重做功能
+- 搜索和替换（支持正则表达式）
+- 跨平台GUI界面（基于GTK4）
+- 内存使用监控
 
-## 实现方式
+## 项目结构
 
-本项目使用Gap Buffer数据结构来存储和管理文本，主要包括以下组件：
+- `textbuffer/`: 核心文本缓冲区实现
+  - `gap_buffer.go`: Gap Buffer实现
+  - `text_buffer.go`: 文本缓冲区API
+  - `position.go`: 位置和范围定义
+  - `undo_stack.go`: 撤销/重做栈
+  - `memory_monitor.go`: 内存监控
+  - `memory_stats.go`: 内存统计
+  - `memory_pool.go`: 内存池
+  - `lua_plugin.go`: Lua插件系统
+  - `lsp.go`: 语言服务器协议支持
+  - `profiler.go`: 性能分析
 
-1. **GapBuffer**: 基于Gap Buffer的文本缓冲区，在文本中维护一个"间隙"，使得在当前编辑位置附近的插入和删除操作可以在常数时间内完成
-2. **TextBuffer**: 主要的文本缓冲区接口，封装了GapBuffer并提供撤销/重做功能
-3. **Position**: 表示文本中的位置（行和列）
-4. **Range**: 表示文本中的范围（起始位置和结束位置）
-5. **UndoStack**: 撤销/重做栈，用于管理文本操作的历史记录
+- `gui/`: GUI界面实现
+  - `main.go`: GUI应用程序入口
+  - `editor/`: 编辑器组件
+    - `window.go`: 主窗口实现
+    - `buffer_adapter.go`: 缓冲区适配器
+    - `shortcuts.go`: 键盘快捷键
+    - `application.go`: 应用程序级功能
+
+## 构建和运行
+
+### 命令行版本
+
+```bash
+go build -o gotextbuffer.exe
+./gotextbuffer.exe
+```
+
+### GUI版本
+
+#### 安装依赖
+
+首先，您需要安装GTK4：
+
+**Windows**:
+1. 安装MSYS2: https://www.msys2.org/
+2. 打开MSYS2 MINGW64 shell并运行:
+   ```
+   pacman -S mingw-w64-x86_64-gtk4 mingw-w64-x86_64-pkgconf mingw-w64-x86_64-gcc
+   ```
+
+**Linux**:
+```bash
+# Ubuntu/Debian
+sudo apt install libgtk-4-dev pkg-config gcc
+
+# Fedora
+sudo dnf install gtk4-devel pkgconf gcc
+```
+
+**macOS**:
+```bash
+brew install gtk4 pkg-config gcc
+```
+
+#### 构建和运行GUI版本
+
+```bash
+go build -o gui.exe
+./gui.exe
+```
 
 ## 使用方法
 
-```go
-import "github.com/example/gotextbuffer/textbuffer"
+### GUI界面
 
-// 创建一个新的文本缓冲区
-buffer := textbuffer.NewTextBuffer()
+1. 文件操作
+   - 新建文件: Ctrl+N
+   - 打开文件: Ctrl+O
+   - 保存文件: Ctrl+S
+   - 另存为: Ctrl+Shift+S
 
-// 插入文本
-buffer.Insert(textbuffer.Position{Line: 0, Column: 0}, "Hello, World!")
+2. 编辑操作
+   - 撤销: Ctrl+Z
+   - 重做: Ctrl+Y
+   - 剪切: Ctrl+X
+   - 复制: Ctrl+C
+   - 粘贴: Ctrl+V
 
-// 获取文本
-text := buffer.GetText()
+3. 搜索和替换
+   - 查找: Ctrl+F
+   - 替换: Ctrl+H
+   - 查找下一个: F3
+   - 查找上一个: Shift+F3
 
-// 删除文本
-buffer.Delete(textbuffer.Range{
-    Start: textbuffer.Position{Line: 0, Column: 0},
-    End:   textbuffer.Position{Line: 0, Column: 5},
-})
+## 性能测试
 
-// 撤销操作
-buffer.Undo()
+项目包含了性能测试，用于测试大文件处理能力：
 
-// 重做操作
-buffer.Redo()
+```bash
+cd textbuffer
+go test -v -run TestLargeFilePerformance
 ```
 
-## 安装
+这将测试以下操作的性能：
+- 生成1GB测试数据
+- 加载1GB文本
+- 读取全部文本
+- 随机位置插入1KB文本
+- 随机位置删除1KB文本
+- 搜索文本
+- 替换所有匹配
 
-```
-go get github.com/example/gotextbuffer
-``` 
+## 许可证
+
+MIT 

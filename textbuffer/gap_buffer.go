@@ -3,6 +3,7 @@ package textbuffer
 import (
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 	"unsafe"
 )
@@ -13,7 +14,7 @@ const (
 	// 最小间隙大小
 	minGapSize = 1024
 	// 最大间隙大小
-	maxGapSize = 1024 * 1024 // 增加到1MB
+	maxGapSize = 1024 * 1024 // 1MB
 	// 当间隙大小小于此值时进行扩展
 	gapSizeThreshold = 1024
 	// 行缓存的大小
@@ -22,7 +23,41 @@ const (
 	largeTextThreshold = 10 * 1024 * 1024 // 10MB
 	// 分块大小，用于分块处理大文本
 	chunkSize = 1024 * 1024 // 1MB
+	// 内存池中缓冲区的最大数量
+	maxBufferPoolSize = 5
+	// 内存池中缓冲区的最大大小
+	maxBufferPoolItemSize = 10 * 1024 * 1024 // 10MB
 )
+
+// 内存池，用于重用缓冲区
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]rune, 0, initialGapSize)
+	},
+}
+
+// 获取缓冲区从内存池
+func getBufferFromPool(capacity int) []rune {
+	if capacity <= maxBufferPoolItemSize {
+		buffer := bufferPool.Get().([]rune)
+		if cap(buffer) < capacity {
+			// 如果容量不够，创建新的
+			bufferPool.Put(buffer) // 放回原来的
+			return make([]rune, 0, capacity)
+		}
+		return buffer[:0] // 重置长度为0
+	}
+	// 对于超大缓冲区，直接创建新的
+	return make([]rune, 0, capacity)
+}
+
+// 将缓冲区放回内存池
+func putBufferToPool(buffer []rune) {
+	if cap(buffer) <= maxBufferPoolItemSize {
+		bufferPool.Put(buffer)
+	}
+	// 对于超大缓冲区，让GC回收
+}
 
 // GapBuffer 是一个基于Gap Buffer的文本缓冲区
 // Gap Buffer是一种高效的文本编辑数据结构，它在文本中维护一个"间隙"，
@@ -62,8 +97,15 @@ type lineInfo struct {
 
 // NewGapBuffer 创建一个新的GapBuffer
 func NewGapBuffer() *GapBuffer {
-	const initialGapSize = 128
-	buffer := make([]rune, initialGapSize)
+	buffer := getBufferFromPool(initialGapSize)
+	// 确保缓冲区大小正确
+	if cap(buffer) < initialGapSize {
+		buffer = make([]rune, initialGapSize)
+	} else {
+		// 调整大小
+		buffer = buffer[:initialGapSize]
+	}
+
 	return &GapBuffer{
 		buffer:              buffer,
 		gapStart:            0,
@@ -93,18 +135,35 @@ func (gb *GapBuffer) GetText() string {
 		return ""
 	}
 
+	// 如果缓存有效，直接返回缓存的文本
+	if gb.textCacheValid {
+		return gb.cachedText
+	}
+
 	var builder strings.Builder
 	builder.Grow(gb.size)
 
+	// 添加间隙前的内容
 	if gb.gapStart > 0 {
 		builder.WriteString(string(gb.buffer[:gb.gapStart]))
 	}
 
+	// 添加间隙后的内容
 	if gb.gapEnd < len(gb.buffer) {
 		builder.WriteString(string(gb.buffer[gb.gapEnd:]))
 	}
 
-	return builder.String()
+	// 更新缓存
+	gb.cachedText = builder.String()
+
+	// 检查并移除可能的空字符
+	if strings.Contains(gb.cachedText, "\x00") {
+		gb.cachedText = strings.ReplaceAll(gb.cachedText, "\x00", "")
+	}
+
+	gb.textCacheValid = true
+
+	return gb.cachedText
 }
 
 // GetLength 获取文本总长度
@@ -130,26 +189,45 @@ func (gb *GapBuffer) GetLineCount() int {
 
 // GetLineContent 获取指定行的内容
 func (gb *GapBuffer) GetLineContent(lineIndex int) string {
+	// 检查行索引是否有效
 	if lineIndex < 0 {
 		return ""
 	}
 
+	// 更新行起始位置缓存
 	gb.updateLineStartCache()
+
+	// 检查行索引是否超出范围
 	if lineIndex >= len(gb.lineStartCache) {
 		return ""
 	}
 
+	// 获取文本内容
 	text := gb.GetText()
+	if text == "" {
+		return ""
+	}
+
+	// 获取行起始位置
 	start := gb.lineStartCache[lineIndex]
 
 	// 计算行结束位置
 	end := len(text)
 	if lineIndex < len(gb.lineStartCache)-1 {
+		// 如果不是最后一行，结束位置是下一行的起始位置
 		end = gb.lineStartCache[lineIndex+1]
 	}
 
-	// 返回行内容
-	if start < end {
+	// 确保起始位置和结束位置在有效范围内
+	if start < 0 {
+		start = 0
+	}
+	if end > len(text) {
+		end = len(text)
+	}
+
+	// 返回行内容（包括换行符）
+	if start < end && start < len(text) {
 		return text[start:end]
 	}
 
@@ -158,16 +236,35 @@ func (gb *GapBuffer) GetLineContent(lineIndex int) string {
 
 // GetLines 获取所有行的内容
 func (gb *GapBuffer) GetLines() []string {
+	// 更新行起始位置缓存
 	gb.updateLineStartCache()
+
+	// 获取文本内容
 	text := gb.GetText()
 
+	// 如果文本为空，返回一个空行
 	if text == "" {
 		return []string{""}
 	}
 
-	lines := make([]string, len(gb.lineStartCache))
-	for i := 0; i < len(gb.lineStartCache); i++ {
-		lines[i] = gb.GetLineContent(i)
+	// 创建行数组
+	lineCount := len(gb.lineStartCache)
+	lines := make([]string, lineCount)
+
+	// 获取每一行的内容
+	for i := 0; i < lineCount; i++ {
+		start := gb.lineStartCache[i]
+		end := len(text)
+
+		if i < lineCount-1 {
+			end = gb.lineStartCache[i+1]
+		}
+
+		if start < end && start < len(text) {
+			lines[i] = text[start:end]
+		} else {
+			lines[i] = ""
+		}
 	}
 
 	return lines
@@ -296,19 +393,17 @@ func (gb *GapBuffer) moveGap(pos int) {
 		// 向左移动间隙
 		// 将[pos, gapStart)的内容移动到间隙后面
 		moveLen := gb.gapStart - pos
-		if moveLen > 0 && gb.gapEnd+moveLen <= len(gb.buffer) {
-			for i := 0; i < moveLen; i++ {
-				gb.buffer[gb.gapEnd+i] = gb.buffer[pos+i]
-			}
+		if moveLen > 0 {
+			// 使用copy而不是循环，更高效
+			copy(gb.buffer[gb.gapEnd-moveLen:], gb.buffer[pos:gb.gapStart])
 		}
 	} else {
 		// 向右移动间隙
 		// 将[gapEnd, pos+gapSize)的内容移动到间隙前面
 		moveLen := pos - gb.gapStart
-		if moveLen > 0 && gb.gapEnd+moveLen <= len(gb.buffer) {
-			for i := 0; i < moveLen; i++ {
-				gb.buffer[gb.gapStart+i] = gb.buffer[gb.gapEnd+i]
-			}
+		if moveLen > 0 {
+			// 使用copy而不是循环，更高效
+			copy(gb.buffer[gb.gapStart:], gb.buffer[gb.gapEnd:gb.gapEnd+moveLen])
 		}
 	}
 
@@ -376,7 +471,9 @@ func (gb *GapBuffer) Insert(position int, text string) {
 	gb.gapStart += insertSize
 	gb.size += insertSize
 
-	// 使行缓存失效
+	// 使缓存失效
+	gb.textCacheValid = false
+	gb.lineCountCacheValid = false
 	gb.lineStartCacheValid = false
 }
 
@@ -411,9 +508,16 @@ func (gb *GapBuffer) Delete(start, end int) {
 		// 更新缓冲区
 		gb.buffer = newBuffer
 		gb.gapEnd = gb.gapStart + newGapSize
+	} else {
+		// 清理间隙中的内容，避免内存泄漏和潜在的空字符问题
+		for i := gb.gapStart; i < gb.gapEnd; i++ {
+			gb.buffer[i] = 0
+		}
 	}
 
-	// 使行缓存失效
+	// 使缓存失效
+	gb.textCacheValid = false
+	gb.lineCountCacheValid = false
 	gb.lineStartCacheValid = false
 }
 
@@ -424,6 +528,10 @@ func (gb *GapBuffer) Clear() {
 	gb.gapStart = 0
 	gb.gapEnd = initialGapSize
 	gb.size = 0
+
+	// 使缓存失效
+	gb.textCacheValid = false
+	gb.lineCountCacheValid = false
 	gb.lineStartCacheValid = false
 }
 
@@ -434,8 +542,23 @@ func (gb *GapBuffer) SetText(text string) {
 
 	// 如果新文本大小超过当前缓冲区大小，创建新的缓冲区
 	if size > len(gb.buffer)-(gb.gapEnd-gb.gapStart) {
+		// 将旧缓冲区放回内存池
+		if gb.buffer != nil {
+			putBufferToPool(gb.buffer)
+		}
+
+		// 从内存池获取新缓冲区
 		bufferSize := size + initialGapSize
-		gb.buffer = make([]rune, bufferSize)
+		newBuffer := getBufferFromPool(bufferSize)
+
+		// 确保缓冲区大小正确
+		if cap(newBuffer) < bufferSize {
+			gb.buffer = make([]rune, bufferSize)
+		} else {
+			// 调整大小
+			gb.buffer = newBuffer[:bufferSize]
+		}
+
 		if size > 0 {
 			copy(gb.buffer, runes)
 		}
@@ -454,6 +577,10 @@ func (gb *GapBuffer) SetText(text string) {
 	}
 
 	gb.size = size
+
+	// 使缓存失效
+	gb.textCacheValid = false
+	gb.lineCountCacheValid = false
 	gb.lineStartCacheValid = false
 }
 
@@ -463,7 +590,12 @@ func (gb *GapBuffer) updateLineStartCache() {
 		return
 	}
 
-	gb.lineStartCache = gb.lineStartCache[:0]
+	// 清空缓存
+	if cap(gb.lineStartCache) > 0 {
+		gb.lineStartCache = gb.lineStartCache[:0]
+	} else {
+		gb.lineStartCache = make([]int, 0, 100) // 预分配空间
+	}
 
 	// 第一行总是从0开始
 	gb.lineStartCache = append(gb.lineStartCache, 0)
@@ -474,20 +606,14 @@ func (gb *GapBuffer) updateLineStartCache() {
 		return
 	}
 
-	// 处理间隙前的内容
-	for i := 0; i < gb.gapStart; i++ {
-		if gb.buffer[i] == '\n' {
+	// 获取文本内容，这样可以避免处理间隙
+	text := gb.GetText()
+
+	// 扫描文本查找换行符
+	for i, ch := range text {
+		if ch == '\n' {
 			// 找到一个换行符，下一行的起始位置是当前位置+1
 			gb.lineStartCache = append(gb.lineStartCache, i+1)
-		}
-	}
-
-	// 处理间隙后的内容
-	for i := gb.gapEnd; i < len(gb.buffer); i++ {
-		if gb.buffer[i] == '\n' {
-			// 找到一个换行符，下一行的起始位置是当前位置+1（需要调整间隙）
-			realPos := i - (gb.gapEnd - gb.gapStart)
-			gb.lineStartCache = append(gb.lineStartCache, realPos+1)
 		}
 	}
 
@@ -518,7 +644,17 @@ func (gb *GapBuffer) GetLineLength(line int) int {
 
 // Close 关闭GapBuffer，释放资源
 func (gb *GapBuffer) Close() {
-	// 不需要释放资源，因为不使用MemoryMonitor和MemoryPool
+	// 将缓冲区放回内存池
+	if gb.buffer != nil {
+		putBufferToPool(gb.buffer)
+		gb.buffer = nil
+	}
+
+	// 清除缓存
+	gb.cachedText = ""
+	gb.textCacheValid = false
+	gb.lineStartCache = nil
+	gb.lineStartCacheValid = false
 }
 
 // GetMemoryStats 获取内存使用统计信息
