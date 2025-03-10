@@ -2,7 +2,7 @@ module github.com/example/gotextbuffer
 
 go 1.21
 
-require github.com/example/gotextbuffer/gui v0.0.0-00010101000000-000000000000
+require github.com/example/gotextbuffer/editor v0.0.0-00010101000000-000000000000
 
 require (
 	github.com/example/gotextbuffer/textbuffer v0.0.0-00010101000000-000000000000 // indirect
@@ -13,4 +13,4 @@ require (
 
 replace github.com/example/gotextbuffer/textbuffer => ./textbuffer
 
-replace github.com/example/gotextbuffer/gui => ./gui
+replace github.com/example/gotextbuffer/editor => ./editor
