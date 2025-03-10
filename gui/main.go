@@ -20,6 +20,8 @@ func main() {
 		// 创建一个新的编辑器窗口
 		win := editor.NewEditorWindow(app)
 
+		gtk.SettingsGetDefault().SetObjectProperty("gtk-theme-name", "win32")
+
 		// 显示窗口
 		win.Show()
 	})
