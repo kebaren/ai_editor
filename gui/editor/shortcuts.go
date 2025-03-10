@@ -68,7 +68,8 @@ func (e *EditorWindow) SetupShortcuts() {
 		}
 
 		// Check for Escape (Close search bar)
-		if keyval == gdk.KEY_Escape && e.searchBar.SearchMode() {
+		if keyval == gdk.KEY_Escape {
+			// 如果搜索栏是可见的，关闭它
 			e.searchBar.SetSearchMode(false)
 			return true
 		}
