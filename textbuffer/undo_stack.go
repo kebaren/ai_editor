@@ -14,6 +14,10 @@ const (
 	OperationDelete
 	// OperationReplace 表示替换操作
 	OperationReplace
+	// OperationClear 表示清空操作
+	OperationClear
+	// OperationSetText 表示设置整个文本内容的操作
+	OperationSetText
 )
 
 // TextOperation 表示一个文本操作
